@@ -40,6 +40,7 @@ PRESERVE_RUNTIME_ENV=(
   PYTORCH_CUDA_ALLOC_CONF
   RAG_DIR
   RAG_EMBED_DEVICE
+  RAG_STRICT_CONTEXT
   RERANKER_MODEL
   RETRIEVE_K
   SYSTEM_PROMPT
@@ -485,6 +486,7 @@ if [[ -n "$GPU_VISIBILITY_NOTE" ]]; then
 fi
 print "PyTorch CUDA alloc conf: $PYTORCH_CUDA_ALLOC_CONF"
 print "RAG embedder: $EMBED on $RAG_EMBED_DEVICE"
+print "RAG strict context: ${RAG_STRICT_CONTEXT:-0}"
 print "Retrieve top-k: $RETRIEVE_TOP_K"
 print "Context chars: $CONTEXT_CHARS"
 print "Max new tokens: $NEW_TOKENS"

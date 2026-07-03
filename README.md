@@ -408,7 +408,13 @@ GENERATOR_DTYPE=bf16 ./chat.zsh
 LOW_VRAM_ROCM_RUNTIME=cpu ./chat.zsh
 LOW_VRAM_ROCM_RUNTIME=rocm ./chat.zsh
 RAG_EMBED_DEVICE=rocm ./chat.zsh
+RAG_STRICT_CONTEXT=1 ./chat.zsh
 ```
+
+RAG chat is retrieval-assisted by default: it uses retrieved passages when they
+are relevant, but can answer from general knowledge when retrieval is unrelated
+or weak. Set `RAG_STRICT_CONTEXT=1` when you want answers constrained only to
+the retrieved local corpus.
 
 Direct Python chat modes:
 

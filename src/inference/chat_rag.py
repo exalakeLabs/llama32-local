@@ -26,6 +26,12 @@ RAG_DIR = env_path("RAG_DIR", "rag")
 RETRIEVE_K = env_int("RETRIEVE_K", 24)
 SYSTEM_PROMPT = env_file_text("SYSTEM_PROMPT_FILE", env_str("SYSTEM_PROMPT"))
 REQUIRE_ACCELERATOR = env_str("CHAT_REQUIRE_ACCELERATOR")
+RAG_STRICT_CONTEXT = env_str("RAG_STRICT_CONTEXT", "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 
 def bytes_to_gib(value: int) -> str:
@@ -515,6 +521,27 @@ def retrieval_query_with_history(
     return "\n\n".join(parts)
 
 
+def build_rag_user_prompt(query: str, context: str, strict_context: bool) -> str:
+    if strict_context:
+        instruction = (
+            "Answer using only the context above. If the context does not contain the answer, "
+            "say that the retrieved context is insufficient."
+        )
+    else:
+        instruction = (
+            "Use the retrieved context when it is relevant and helpful. "
+            "If the retrieved context is unrelated, incomplete, or weak, say so briefly and "
+            "answer from your general knowledge instead. Do not pretend the context supports "
+            "an answer when it does not."
+        )
+
+    return (
+        f"Question:\n{query}\n\n"
+        f"Retrieved context:\n{context}\n\n"
+        f"Instruction:\n{instruction}"
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Chat with a local FAISS RAG index.")
     parser.add_argument("--rag-dir", default=str(RAG_DIR))
@@ -529,6 +556,15 @@ def main() -> int:
     parser.add_argument("--max-context-chars", type=int, default=MAX_CONTEXT_CHARS)
     parser.add_argument("--system-prompt", default=SYSTEM_PROMPT)
     parser.add_argument("--require-accelerator", default=REQUIRE_ACCELERATOR)
+    parser.add_argument(
+        "--strict-context",
+        action=argparse.BooleanOptionalAction,
+        default=RAG_STRICT_CONTEXT,
+        help=(
+            "Require answers to use only retrieved context. Default is false, so the model "
+            "may answer from general knowledge when retrieval is irrelevant."
+        ),
+    )
     parser.add_argument(
         "--memory-turns",
         type=int,
@@ -611,10 +647,10 @@ def main() -> int:
             if args.max_context_chars > 0:
                 print(f"Context character budget: {args.max_context_chars}")
 
-            user_prompt = (
-                f"Question:\n{query}\n\n"
-                f"Context:\n{context}\n\n"
-                "Answer using only the context above."
+            user_prompt = build_rag_user_prompt(
+                query=query,
+                context=context,
+                strict_context=args.strict_context,
             )
 
         messages = [
