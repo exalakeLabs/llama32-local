@@ -435,11 +435,50 @@ def retrieve(query, embedder, index, rows, top_k=RETRIEVE_K):
     return hits
 
 
+def hit_text(hit: dict) -> str:
+    return str(hit.get("text") or hit.get("content") or hit.get("chunk") or "")
+
+
+def hit_source(hit: dict) -> str:
+    metadata = hit.get("metadata")
+    if isinstance(metadata, dict):
+        nested_source = (
+            metadata.get("source")
+            or metadata.get("source_relpath")
+            or metadata.get("source_path")
+            or metadata.get("path")
+            or metadata.get("file")
+            or metadata.get("title")
+        )
+        if nested_source:
+            return str(nested_source)
+
+    return str(
+        hit.get("source")
+        or hit.get("source_relpath")
+        or hit.get("source_path")
+        or hit.get("path")
+        or hit.get("file")
+        or hit.get("document")
+        or hit.get("title")
+        or "<unknown source>"
+    )
+
+
+def hit_chunk_id(hit: dict, fallback_index: int) -> str:
+    return str(
+        hit.get("chunk_id")
+        or hit.get("chunk_index")
+        or hit.get("id")
+        or fallback_index
+    )
+
+
 def format_context(hits, max_chars: int = MAX_CONTEXT_CHARS):
     parts = []
     remaining = max_chars
     for i, hit in enumerate(hits, start=1):
-        text = hit["text"]
+        text = hit_text(hit)
         if max_chars > 0:
             if remaining <= 0:
                 break
@@ -447,7 +486,7 @@ def format_context(hits, max_chars: int = MAX_CONTEXT_CHARS):
                 text = text[:remaining].rstrip() + "\n[truncated]"
             remaining -= len(text)
         parts.append(
-            f"[Context {i} | source={hit['source']} | chunk={hit['chunk_id']} | score={hit['score']:.4f}]\n"
+            f"[Context {i} | source={hit_source(hit)} | chunk={hit_chunk_id(hit, i)} | score={hit['score']:.4f}]\n"
             f"{text}"
         )
     return "\n\n".join(parts)
@@ -567,8 +606,8 @@ def main() -> int:
             context = format_context(hits, max_chars=args.max_context_chars)
 
             print("\n--- RETRIEVED CONTEXT ---\n")
-            for hit in hits:
-                print(f"{hit['source']} [chunk {hit['chunk_id']}] score={hit['score']:.4f}")
+            for i, hit in enumerate(hits, start=1):
+                print(f"{hit_source(hit)} [chunk {hit_chunk_id(hit, i)}] score={hit['score']:.4f}")
             if args.max_context_chars > 0:
                 print(f"Context character budget: {args.max_context_chars}")
 
