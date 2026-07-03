@@ -229,6 +229,58 @@ Or through the workflow runner:
 The output directory also includes `create_corpus_token_manifest.json` recording
 the tokenizer/model, source directory, block size, and number of packed blocks.
 
+### Inspect Tokenizer Vocabulary
+
+Dump the tokenizer vocabulary used to turn text into token IDs:
+
+```bash
+python3 src/dump_tokenizer_vocab.py \
+  --model_name "$DEFAULT_MODEL" \
+  --output "$CORPUS_DIR/tokenizer_vocab.jsonl"
+```
+
+For a quick terminal preview:
+
+```bash
+python3 src/dump_tokenizer_vocab.py --limit 50 --format tsv
+```
+
+To inspect an OpenAI/tiktoken vocabulary:
+
+```bash
+python3 src/dump_tokenizer_vocab.py \
+  --backend tiktoken \
+  --encoding o200k_base \
+  --limit 50 \
+  --format tsv
+```
+
+Or select the encoding by OpenAI model name:
+
+```bash
+python3 src/dump_tokenizer_vocab.py \
+  --backend tiktoken \
+  --openai-model gpt-4o \
+  --output "$CORPUS_DIR/tiktoken_o200k_vocab.jsonl"
+```
+
+`CreateCorpusToken` can also use tiktoken for experimental OpenAI-tokenizer
+datasets:
+
+```bash
+python3 src/create_corpus_token.py \
+  --tokenizer_backend tiktoken \
+  --tiktoken_encoding o200k_base \
+  --text_dir "$PREPARED_DIR" \
+  --output_dir "$CORPUS_DIR/tokenized-o200k" \
+  --block_size 4096 \
+  --overwrite
+```
+
+Keep the default Hugging Face backend when creating token IDs for Qwen, Llama,
+or other Hugging Face causal language models. Token IDs from tiktoken are from a
+different vocabulary and are not interchangeable with those models.
+
 ### RAG Stage
 
 Build a FAISS index from `PREPARED_DIR`:

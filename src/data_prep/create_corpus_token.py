@@ -28,10 +28,9 @@ import json
 import os
 import shutil
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Optional
 
 from datasets import Dataset
-from transformers import AutoTokenizer
 
 try:
     import _bootstrap  # noqa: F401
@@ -103,7 +102,7 @@ def load_text_dataset(text_dir: Path, glob_pattern: str, min_chars: int) -> Data
 
 def tokenize_dataset(
     dataset: Dataset,
-    tokenizer,
+    tokenizer_backend,
     dataset_num_proc: int,
     tokenize_batch_size: int,
 ) -> Dataset:
@@ -111,11 +110,7 @@ def tokenize_dataset(
     print(f"\nTokenizing with num_proc={num_proc}, batch_size={tokenize_batch_size}\n")
 
     def tokenize_batch(batch):
-        return tokenizer(
-            batch["text"],
-            add_special_tokens=False,
-            truncation=False,
-        )
+        return {"input_ids": tokenizer_backend.encode_batch(batch["text"])}
 
     return dataset.map(
         tokenize_batch,
@@ -125,6 +120,73 @@ def tokenize_dataset(
         num_proc=num_proc,
         desc="Tokenizing text",
     )
+
+
+class HuggingFaceTokenizerBackend:
+    def __init__(self, model_name: str):
+        from transformers import AutoTokenizer
+
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_name,
+            trust_remote_code=True,
+            use_fast=True,
+        )
+        if self.tokenizer.pad_token_id is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
+    @property
+    def eos_token_id(self):
+        return self.tokenizer.eos_token_id
+
+    @property
+    def name_or_path(self) -> str:
+        return getattr(self.tokenizer, "name_or_path", "")
+
+    def encode_batch(self, texts: list[str]) -> list[list[int]]:
+        encoded = self.tokenizer(
+            texts,
+            add_special_tokens=False,
+            truncation=False,
+        )
+        return encoded["input_ids"]
+
+
+class TiktokenTokenizerBackend:
+    def __init__(self, encoding_name: str, openai_model: str, eos_token_id: Optional[int]):
+        import tiktoken
+
+        if openai_model:
+            self.encoding = tiktoken.encoding_for_model(openai_model)
+            self.name = f"tiktoken:model:{openai_model}"
+        else:
+            self.encoding = tiktoken.get_encoding(encoding_name)
+            self.name = f"tiktoken:encoding:{encoding_name}"
+
+        self._eos_token_id = eos_token_id
+        if self._eos_token_id is None:
+            special_tokens = getattr(self.encoding, "_special_tokens", {})
+            self._eos_token_id = special_tokens.get("<|endoftext|>")
+
+    @property
+    def eos_token_id(self):
+        return self._eos_token_id
+
+    @property
+    def name_or_path(self) -> str:
+        return self.name
+
+    def encode_batch(self, texts: list[str]) -> list[list[int]]:
+        return [self.encoding.encode_ordinary(text) for text in texts]
+
+
+def load_tokenizer_backend(args: argparse.Namespace):
+    if args.tokenizer_backend == "tiktoken":
+        return TiktokenTokenizerBackend(
+            encoding_name=args.tiktoken_encoding,
+            openai_model=args.openai_model,
+            eos_token_id=args.eos_token_id,
+        )
+    return HuggingFaceTokenizerBackend(args.model_name)
 
 
 def pack_token_dataset(
@@ -178,6 +240,9 @@ def write_manifest(
     manifest = {
         "tool": "CreateCorpusToken",
         "model_name": args.model_name,
+        "tokenizer_backend": args.tokenizer_backend,
+        "tiktoken_encoding": args.tiktoken_encoding if args.tokenizer_backend == "tiktoken" else None,
+        "openai_model": args.openai_model if args.tokenizer_backend == "tiktoken" else None,
         "tokenizer_name_or_path": tokenizer_name_or_path,
         "text_dir": str(Path(args.text_dir).expanduser()),
         "glob": args.glob,
@@ -204,6 +269,31 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--model_name", default=DEFAULT_MODEL)
+    parser.add_argument(
+        "--tokenizer_backend",
+        choices=("hf", "tiktoken"),
+        default="hf",
+        help=(
+            "Tokenizer backend. Use hf for Hugging Face model training. "
+            "Use tiktoken for OpenAI tokenizer experiments."
+        ),
+    )
+    parser.add_argument(
+        "--tiktoken_encoding",
+        default="o200k_base",
+        help='tiktoken encoding name. Default: "o200k_base".',
+    )
+    parser.add_argument(
+        "--openai-model",
+        default="",
+        help='Use tiktoken.encoding_for_model, e.g. "gpt-4o". Overrides --tiktoken_encoding.',
+    )
+    parser.add_argument(
+        "--eos_token_id",
+        type=int,
+        default=None,
+        help="Explicit EOS token ID for tiktoken or unusual tokenizers.",
+    )
     parser.add_argument(
         "--text_dir",
         default=DEFAULT_TEXT_DIR,
@@ -273,7 +363,7 @@ def main() -> int:
     text_dir = Path(args.text_dir).expanduser()
     output_dir = Path(args.output_dir).expanduser()
 
-    if not args.model_name:
+    if args.tokenizer_backend == "hf" and not args.model_name:
         raise SystemExit("--model_name is required")
     if args.block_size <= 0:
         raise SystemExit("--block_size must be greater than 0")
@@ -291,15 +381,14 @@ def main() -> int:
             )
         shutil.rmtree(output_dir)
 
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.model_name,
-        trust_remote_code=True,
-        use_fast=True,
-    )
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    if tokenizer.eos_token_id is None and args.add_eos:
-        raise SystemExit("Tokenizer has no eos_token_id; rerun with --no-add_eos.")
+    tokenizer_backend = load_tokenizer_backend(args)
+    if tokenizer_backend.eos_token_id is None and args.add_eos:
+        raise SystemExit("Tokenizer has no eos_token_id; rerun with --no-add_eos or pass --eos_token_id.")
+    if args.tokenizer_backend == "tiktoken":
+        print(
+            "warning: tiktoken token IDs are for OpenAI/tiktoken encodings. "
+            "Do not use this dataset to train a Hugging Face model with a different tokenizer."
+        )
 
     raw_dataset = load_text_dataset(
         text_dir=text_dir,
@@ -308,13 +397,13 @@ def main() -> int:
     )
     tokenized = tokenize_dataset(
         raw_dataset,
-        tokenizer=tokenizer,
+        tokenizer_backend=tokenizer_backend,
         dataset_num_proc=args.dataset_num_proc,
         tokenize_batch_size=args.tokenize_batch_size,
     )
     packed = pack_token_dataset(
         tokenized,
-        eos_token_id=tokenizer.eos_token_id,
+        eos_token_id=tokenizer_backend.eos_token_id,
         block_size=args.block_size,
         dataset_num_proc=args.dataset_num_proc,
         pack_batch_size=args.pack_batch_size,
@@ -331,7 +420,7 @@ def main() -> int:
     write_manifest(
         output_dir=output_dir,
         args=args,
-        tokenizer_name_or_path=getattr(tokenizer, "name_or_path", args.model_name),
+        tokenizer_name_or_path=tokenizer_backend.name_or_path,
         document_count=len(raw_dataset),
         block_count=len(packed),
     )
