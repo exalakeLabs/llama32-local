@@ -120,9 +120,15 @@ Prompt configuration:
 
 ```bash
 SYSTEM_PROMPT_FILE=prompt_engineer.txt
+CHAT_INCLUDE_EVAL_PROMPTS=0
 ```
 
-`SYSTEM_PROMPT` is still supported as a fallback when no prompt file is set.
+`prompt_engineer.txt` is the main chat system prompt. `SYSTEM_PROMPT` is still
+supported as a fallback when no prompt file is set. `eval_prompts.txt` is used by
+training and evaluation flows; interactive chat leaves it disabled by default so
+normal questions are not over-constrained by retrieval-evaluation instructions.
+Set `CHAT_INCLUDE_EVAL_PROMPTS=1` when you explicitly want those eval priorities
+appended to chat.
 
 ## The Pipeline Runner
 
@@ -409,12 +415,14 @@ LOW_VRAM_ROCM_RUNTIME=cpu ./chat.zsh
 LOW_VRAM_ROCM_RUNTIME=rocm ./chat.zsh
 RAG_EMBED_DEVICE=rocm ./chat.zsh
 RAG_STRICT_CONTEXT=1 ./chat.zsh
+CHAT_INCLUDE_EVAL_PROMPTS=1 ./chat.zsh
 ```
 
 RAG chat is retrieval-assisted by default: it uses retrieved passages when they
 are relevant, but can answer from general knowledge when retrieval is unrelated
 or weak. Set `RAG_STRICT_CONTEXT=1` when you want answers constrained only to
-the retrieved local corpus.
+the retrieved local corpus. `CHAT_INCLUDE_EVAL_PROMPTS=1` appends
+`eval_prompts.txt` to the system prompt for evaluation-style runs.
 
 Direct Python chat modes:
 

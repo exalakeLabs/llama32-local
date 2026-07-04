@@ -524,21 +524,22 @@ def retrieval_query_with_history(
 def build_rag_user_prompt(query: str, context: str, strict_context: bool) -> str:
     if strict_context:
         instruction = (
-            "Answer using only the context above. If the context does not contain the answer, "
-            "say that the retrieved context is insufficient."
+            "Strict retrieval mode is enabled. Answer using only the retrieved context. "
+            "If the context does not contain the answer, say that the retrieved context is insufficient."
         )
     else:
         instruction = (
-            "Use the retrieved context when it is relevant and helpful. "
-            "If the retrieved context is unrelated, incomplete, or weak, say so briefly and "
-            "answer from your general knowledge instead. Do not pretend the context supports "
-            "an answer when it does not."
+            "General assistant mode is enabled. Treat the retrieved context as optional evidence. "
+            "Use it when it is relevant, specific, and helpful. If it is unrelated, incomplete, "
+            "or weak, say that briefly and answer from general knowledge when the question can be "
+            "answered generally. Do not pretend the context supports an answer when it does not. "
+            "For project-specific questions, prefer concrete project evidence over memory."
         )
 
     return (
-        f"Question:\n{query}\n\n"
+        f"User question:\n{query}\n\n"
         f"Retrieved context:\n{context}\n\n"
-        f"Instruction:\n{instruction}"
+        f"Retrieval policy:\n{instruction}"
     )
 
 

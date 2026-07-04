@@ -7,6 +7,7 @@ cd "$ROOT"
 PRESERVE_RUNTIME_ENV=(
   ADAPTER_DIR
   BASE_MODEL
+  CHAT_INCLUDE_EVAL_PROMPTS
   CHAT_REQUIRE_ACCELERATOR
   CHAT_MEMORY_TURNS
   CUDA_VISIBLE_DEVICES
@@ -493,18 +494,22 @@ print "Max new tokens: $NEW_TOKENS"
 print "Chat memory turns: $MEMORY_TURNS"
 
 EVAL_PROMPTS_FILE="${EVAL_PROMPTS:-$ROOT/eval_prompts.txt}"
-CHAT_SYSTEM_PROMPT="${SYSTEM_PROMPT:-Answer science and technical questions using the retrieved context. Be precise, cite uncertainty, and say when the context is insufficient.}"
-if [[ -f "$EVAL_PROMPTS_FILE" ]]; then
-  EVAL_PROMPT_GUIDANCE="$(awk 'NF {print "- " $0}' "$EVAL_PROMPTS_FILE")"
-  if [[ -n "$EVAL_PROMPT_GUIDANCE" ]]; then
-    CHAT_SYSTEM_PROMPT="${CHAT_SYSTEM_PROMPT}
+CHAT_SYSTEM_PROMPT="${SYSTEM_PROMPT:-You are a general-purpose local AI assistant. Use retrieved context when relevant, ignore it when it is clearly unrelated, and answer directly with uncertainty when needed.}"
+if [[ "${CHAT_INCLUDE_EVAL_PROMPTS:-0}" == "1" ]]; then
+  if [[ -f "$EVAL_PROMPTS_FILE" ]]; then
+    EVAL_PROMPT_GUIDANCE="$(awk 'NF {print "- " $0}' "$EVAL_PROMPTS_FILE")"
+    if [[ -n "$EVAL_PROMPT_GUIDANCE" ]]; then
+      CHAT_SYSTEM_PROMPT="${CHAT_SYSTEM_PROMPT}
 
-Use these evaluation priorities from ${EVAL_PROMPTS_FILE} when answering:
+Use these optional evaluation priorities from ${EVAL_PROMPTS_FILE} when they fit the user's request:
 ${EVAL_PROMPT_GUIDANCE}"
-    print "Eval prompt guidance: $EVAL_PROMPTS_FILE"
+      print "Eval prompt guidance: $EVAL_PROMPTS_FILE"
+    fi
+  else
+    print "warning: eval prompts file not found: $EVAL_PROMPTS_FILE"
   fi
 else
-  print "warning: eval prompts file not found: $EVAL_PROMPTS_FILE"
+  print "Eval prompt guidance: disabled (set CHAT_INCLUDE_EVAL_PROMPTS=1 to enable)"
 fi
 
 if [[ "${LAUNCH_CHAT_DRY_RUN:-0}" == "1" ]]; then
