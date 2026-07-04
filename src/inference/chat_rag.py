@@ -521,11 +521,42 @@ def retrieval_query_with_history(
     return "\n\n".join(parts)
 
 
-def build_rag_user_prompt(query: str, context: str, strict_context: bool) -> str:
+def format_conversation_memory(
+    history: list[dict[str, str]],
+    memory_turns: int,
+    max_chars: int = 2000,
+) -> str:
+    recent = trim_history(history, memory_turns)
+    if not recent:
+        return "No prior turns in this chat session."
+
+    parts = []
+    remaining = max_chars
+    for message in recent:
+        role = "User" if message["role"] == "user" else "Assistant"
+        text = message["content"].strip()
+        line = f"{role}: {text}"
+        if max_chars > 0:
+            if remaining <= 0:
+                break
+            if len(line) > remaining:
+                line = line[:remaining].rstrip() + " [truncated]"
+            remaining -= len(line)
+        parts.append(line)
+    return "\n".join(parts) if parts else "No prior turns in this chat session."
+
+
+def build_rag_user_prompt(
+    query: str,
+    context: str,
+    strict_context: bool,
+    conversation_memory: str = "",
+) -> str:
     if strict_context:
         instruction = (
             "Strict retrieval mode is enabled. Answer using only the retrieved context. "
-            "If the context does not contain the answer, say that the retrieved context is insufficient."
+            "If the user asks about the current chat session itself, use conversation memory. "
+            "Otherwise, if the retrieved context does not contain the answer, say that the retrieved context is insufficient."
         )
     else:
         instruction = (
@@ -533,10 +564,13 @@ def build_rag_user_prompt(query: str, context: str, strict_context: bool) -> str
             "Use it when it is relevant, specific, and helpful. If it is unrelated, incomplete, "
             "or weak, say that briefly and answer from general knowledge when the question can be "
             "answered generally. Do not pretend the context supports an answer when it does not. "
-            "For project-specific questions, prefer concrete project evidence over memory."
+            "For follow-up questions, pronouns, corrections, or questions about what was said earlier "
+            "in this chat, use conversation memory before retrieved context. For project-specific "
+            "questions, prefer concrete project evidence over general memory."
         )
 
     return (
+        f"Conversation memory:\n{conversation_memory}\n\n"
         f"User question:\n{query}\n\n"
         f"Retrieved context:\n{context}\n\n"
         f"Retrieval policy:\n{instruction}"
@@ -652,6 +686,10 @@ def main() -> int:
                 query=query,
                 context=context,
                 strict_context=args.strict_context,
+                conversation_memory=format_conversation_memory(
+                    history,
+                    memory_turns=args.memory_turns,
+                ),
             )
 
         messages = [
