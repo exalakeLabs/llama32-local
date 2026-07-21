@@ -7,6 +7,8 @@ The project is tuned for experimenting on local hardware, including consumer
 AMD/ROCm and NVIDIA GPUs. The current defaults favor low-VRAM Radeon cards such
 as 8 GB RDNA3 parts, while leaving the knobs exposed for larger GPUs.
 
+![Bolt Graphics Zeus](https://raw.githubusercontent.com/exalakeLabs/res/main/images/Bolt-Graphics-Zeus-1456x819-2949710606.png)
+
 ## What This Project Does
 
 This repo lets you build a local model workspace from source documents:
