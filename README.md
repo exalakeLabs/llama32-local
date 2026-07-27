@@ -28,6 +28,7 @@ install.zsh             Create/update .venv, install backend-specific PyTorch.
 pipeline.zsh            Compatibility wrapper for run-train-pipeline.zsh.
 run-train-pipeline.zsh  Main workflow runner for corpus, RAG, pretraining, LoRA.
 chat.zsh                Runtime launcher with low/high-VRAM GPU profiles.
+layoutlm-invoices.zsh   Starts the invoice document-QA wrapper.
 ```
 
 The Python files under `src/*.py` are compatibility wrappers around the package
@@ -463,6 +464,44 @@ are relevant, but can answer from general knowledge when retrieval is unrelated
 or weak. Set `RAG_STRICT_CONTEXT=1` when you want answers constrained only to
 the retrieved local corpus. `CHAT_INCLUDE_EVAL_PROMPTS=1` appends
 `eval_prompts.txt` to the system prompt for evaluation-style runs.
+
+### Invoice Document QA
+
+`layoutlm-invoices.zsh` starts a small wrapper for
+`impira/layoutlm-invoices`, a Hugging Face document-question-answering model
+for invoice images.
+
+Start the local HTTP server:
+
+```bash
+./layoutlm-invoices.zsh
+```
+
+Health check:
+
+```bash
+curl http://127.0.0.1:7862/health
+```
+
+Ask a question against an invoice image:
+
+```bash
+curl -F "file=@invoice.png" \
+  -F "question=What is the total due?" \
+  http://127.0.0.1:7862/answer
+```
+
+One-shot CLI mode:
+
+```bash
+./layoutlm-invoices.zsh \
+  --image invoice.png \
+  --question "What is the invoice number?" \
+  --json
+```
+
+The wrapper expects PNG/JPEG-style image input. Convert PDFs to page images
+before sending them to the model.
 
 Direct Python chat modes:
 
