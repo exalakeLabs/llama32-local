@@ -211,9 +211,10 @@ def build_trainable_tail_device_map(model_name, train_last_n_layers, train_lm_he
     model_type = getattr(config, "model_type", "")
     total_layers = getattr(config, "num_hidden_layers", None)
 
-    if model_type != "gpt_oss" or total_layers is None:
+    supported_model_types = {"gpt_oss", "llama", "mistral", "qwen2"}
+    if model_type not in supported_model_types or total_layers is None:
         print(
-            "trainable device map is only specialized for GPT-OSS; "
+            f"trainable device map is not specialized for model_type={model_type!r}; "
             "falling back to device_map=auto."
         )
         return "auto"
@@ -222,11 +223,12 @@ def build_trainable_tail_device_map(model_name, train_last_n_layers, train_lm_he
     freeze_until = total_layers - train_last_n_layers
     device_map = {
         "model.embed_tokens": "cpu",
-        "model.rotary_emb": "cpu",
         "model.norm": 0,
         # Keep logits/loss on GPU; leave the parameters frozen unless requested.
         "lm_head": 0,
     }
+    if model_type == "gpt_oss":
+        device_map["model.rotary_emb"] = "cpu"
 
     for idx in range(total_layers):
         device_map[f"model.layers.{idx}"] = 0 if idx >= freeze_until else "cpu"

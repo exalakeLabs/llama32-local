@@ -18,3 +18,4 @@ hf_token.txt
 .DS_Store
 pipeline.log
 .idea/workspace.xml
+*.swp
