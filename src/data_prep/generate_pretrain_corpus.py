@@ -54,6 +54,7 @@ DEFAULT_SEED = env_int("DEFAULT_SEED", 42)
 DEFAULT_SEQ_LEN = env_int("DEFAULT_SEQ_LEN", 2048)
 DEFAULT_TEXT_DIR = env_str("DEFAULT_TEXT_DIR")
 DEFAULT_TOKENIZE_BATCH_SIZE = env_int("DEFAULT_TOKENIZE_BATCH_SIZE", 128)
+RAG_DIR = env_str("RAG_DIR")
 
 CHECKPOINT_VERSION = 1
 
@@ -62,6 +63,34 @@ def resolve_num_proc(dataset_num_proc: int) -> int:
     if dataset_num_proc > 0:
         return dataset_num_proc
     return max((os.cpu_count() or 2) // 2, 1)
+
+
+def print_runtime_note() -> None:
+    print(
+        "\nRuntime note: generate_pretrain_corpus.py is a CPU tokenizer/dataset "
+        "packing step. GPU utilization is not expected here."
+    )
+    print(
+        "Tune throughput with --num_proc and --tokenize_batch_size. GPU usage "
+        "shows up in RAG embedding, model training, and chat/inference.\n"
+    )
+
+
+def warn_if_output_overlaps_rag(corpus_dir: Path) -> None:
+    if not RAG_DIR:
+        return
+
+    try:
+        same_dir = corpus_dir.resolve() == Path(RAG_DIR).expanduser().resolve()
+    except OSError:
+        same_dir = False
+
+    if same_dir:
+        print(
+            "Warning: --corpus_dir matches RAG_DIR. This script writes "
+            "continued-pretraining files such as train.jsonl and eval.jsonl; "
+            "the RAG index should usually live in a separate directory."
+        )
 
 
 def load_text_files(text_dir: Path, glob_pattern: str, min_chars: int) -> Dataset:
@@ -460,6 +489,9 @@ def main() -> int:
         raise SystemExit("--eval_ratio must be > 0 and < 1")
     if args.tokenize_batch_size <= 0:
         raise SystemExit("--tokenize_batch_size must be greater than 0")
+
+    print_runtime_note()
+    warn_if_output_overlaps_rag(corpus_dir)
 
     source_hash = source_fingerprint(
         text_dir=text_dir,

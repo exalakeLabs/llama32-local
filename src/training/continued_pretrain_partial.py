@@ -51,7 +51,7 @@ python src/continued_pretrain_partial.py \
     --train_last_n_layers 4 \
     --per_device_train_batch_size 1 \
     --gradient_accumulation_steps 64 \
-    --attention sdpa \
+    --attention eager \
     --dataloader_num_workers 2
 """
 
@@ -65,6 +65,7 @@ import torch
 from datasets import load_dataset
 
 from transformers import (
+    AutoConfig,
     AutoTokenizer,
     AutoModelForCausalLM,
     Mxfp4Config,
@@ -109,6 +110,7 @@ DEFAULT_OPTIM = env_str("DEFAULT_OPTIM", "adamw_torch_fused")
 DEFAULT_OUTPUT_DIR = env_str("DEFAULT_OUTPUT_DIR")
 DEFAULT_PER_DEVICE_EVAL_BATCH_SIZE = env_int("DEFAULT_PER_DEVICE_EVAL_BATCH_SIZE", 1)
 DEFAULT_PER_DEVICE_TRAIN_BATCH_SIZE = env_int("DEFAULT_PER_DEVICE_TRAIN_BATCH_SIZE", 8)
+DEFAULT_PROMPT_EVAL = env_str("DEFAULT_PROMPT_EVAL", "auto").lower()
 DEFAULT_SAVE_STEPS = env_int("DEFAULT_SAVE_STEPS", 250)
 DEFAULT_SAVE_TOTAL_LIMIT = env_int("DEFAULT_SAVE_TOTAL_LIMIT", 2)
 DEFAULT_TRAIN_FILE = env_str("DEFAULT_TRAIN_FILE", "train.jsonl")
@@ -198,11 +200,61 @@ def configure_torch_backend(tf32, float32_matmul_precision):
     print(f"float32 matmul precision: {float32_matmul_precision}")
 
 
-def resolve_device_map(device_map):
+def build_trainable_tail_device_map(model_name, train_last_n_layers, train_lm_head):
+    if not torch.cuda.is_available():
+        return "auto"
+
+    config = AutoConfig.from_pretrained(
+        model_name,
+        trust_remote_code=True,
+    )
+    model_type = getattr(config, "model_type", "")
+    total_layers = getattr(config, "num_hidden_layers", None)
+
+    if model_type != "gpt_oss" or total_layers is None:
+        print(
+            "trainable device map is only specialized for GPT-OSS; "
+            "falling back to device_map=auto."
+        )
+        return "auto"
+
+    train_last_n_layers = min(max(train_last_n_layers, 0), total_layers)
+    freeze_until = total_layers - train_last_n_layers
+    device_map = {
+        "model.embed_tokens": "cpu",
+        "model.rotary_emb": "cpu",
+        "model.norm": 0,
+        # Keep logits/loss on GPU; leave the parameters frozen unless requested.
+        "lm_head": 0,
+    }
+
+    for idx in range(total_layers):
+        device_map[f"model.layers.{idx}"] = 0 if idx >= freeze_until else "cpu"
+
+    print(
+        "Using trainable-tail device map: "
+        f"{train_last_n_layers} upper layer(s), final norm, and lm_head on GPU; "
+        "frozen lower layers on CPU."
+    )
+    if train_lm_head:
+        print("LM head is placed on GPU and will be trainable.")
+    else:
+        print("LM head is placed on GPU for loss computation but remains frozen.")
+
+    return device_map
+
+
+def resolve_device_map(device_map, model_name, train_last_n_layers, train_lm_head):
     if device_map == "none":
         return None
     if device_map == "single":
         return {"": 0}
+    if device_map == "trainable":
+        return build_trainable_tail_device_map(
+            model_name,
+            train_last_n_layers,
+            train_lm_head,
+        )
     return device_map
 
 
@@ -301,6 +353,36 @@ class TruncatingDataCollator:
 # Model loading
 # ============================================================
 
+def load_with_attention(common, attention, allow_eager_fallback=False):
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            **common,
+            attn_implementation=attention,
+        )
+        return model, attention
+    except ValueError as e:
+        message = str(e)
+        unsupported_attention = (
+            "does not support an attention implementation" in message
+            or (
+                "does not support" in message
+                and "attn_implementation" in message
+            )
+        )
+        if (
+            allow_eager_fallback
+            and attention in {"flash_attention_2", "sdpa"}
+            and unsupported_attention
+        ):
+            print(f"{attention} attention is not supported for this model; falling back to eager.")
+            model = AutoModelForCausalLM.from_pretrained(
+                **common,
+                attn_implementation="eager",
+            )
+            return model, "eager"
+        raise
+
+
 def load_causal_lm(
     model_name,
     dtype,
@@ -308,6 +390,8 @@ def load_causal_lm(
     device_map=DEFAULT_DEVICE_MAP,
     max_memory=DEFAULT_MAX_MEMORY,
     cpu_memory=DEFAULT_CPU_MEMORY,
+    train_last_n_layers=DEFAULT_TRAIN_LAST_N_LAYERS,
+    train_lm_head=DEFAULT_TRAIN_LM_HEAD,
     mxfp4_dequantize=DEFAULT_MXFP4_DEQUANTIZE,
     low_cpu_mem_usage=True,
 ):
@@ -321,7 +405,12 @@ def load_causal_lm(
     if mxfp4_dequantize:
         common["quantization_config"] = Mxfp4Config(dequantize=True)
 
-    resolved_device_map = resolve_device_map(device_map)
+    resolved_device_map = resolve_device_map(
+        device_map,
+        model_name,
+        train_last_n_layers,
+        train_lm_head,
+    )
     if resolved_device_map is not None:
         common["device_map"] = resolved_device_map
         if device_map == "auto":
@@ -334,36 +423,28 @@ def load_causal_lm(
         return AutoModelForCausalLM.from_pretrained(**common)
 
     if attention == "eager":
-        model = AutoModelForCausalLM.from_pretrained(
-            **common,
-            attn_implementation="eager",
-        )
+        model, _ = load_with_attention(common, "eager")
         print("eager attention enabled.")
         return model
 
     if attention != "auto":
-        model = AutoModelForCausalLM.from_pretrained(
-            **common,
-            attn_implementation=attention,
+        model, resolved_attention = load_with_attention(
+            common,
+            attention,
+            allow_eager_fallback=True,
         )
-        print(f"{attention} attention enabled.")
+        print(f"{resolved_attention} attention enabled.")
         return model
 
     try:
-        model = AutoModelForCausalLM.from_pretrained(
-            **common,
-            attn_implementation="flash_attention_2",
-        )
+        model, _ = load_with_attention(common, "flash_attention_2")
         print("Flash Attention 2 enabled.")
         return model
     except (ImportError, TypeError, ValueError) as e:
         print(f"Flash Attention 2 not available; falling back to SDPA. ({e})")
 
     try:
-        model = AutoModelForCausalLM.from_pretrained(
-            **common,
-            attn_implementation="sdpa",
-        )
+        model, _ = load_with_attention(common, "sdpa")
         print("SDPA attention enabled.")
         return model
     except (ImportError, TypeError, ValueError) as e:
@@ -466,19 +547,62 @@ def validate_trainable_device_placement(model):
             "No trainable parameters are on the GPU. With device_map=auto and a low "
             "max_memory cap, Accelerate can place the frozen lower layers on GPU and "
             "the trainable upper layers on CPU, which breaks AMP optimizer stepping. "
-            "Use DEFAULT_DEVICE_MAP=single, increase DEFAULT_MAX_MEMORY enough to keep "
-            "trainable layers on GPU, or reduce trainable state with "
-            "DEFAULT_TRAIN_LAST_N_LAYERS=1 and DEFAULT_TRAIN_LM_HEAD=0."
+            "For GPT-OSS partial pretraining, use DEFAULT_DEVICE_MAP=trainable. "
+            "Otherwise increase DEFAULT_MAX_MEMORY enough to keep trainable layers "
+            "on GPU, or reduce trainable state with DEFAULT_TRAIN_LAST_N_LAYERS=1 "
+            "and DEFAULT_TRAIN_LM_HEAD=0."
         )
 
 # ============================================================
 # Evaluation
 # ============================================================
 
+def preferred_input_device(model):
+    for param in model.parameters():
+        if param.device.type == "cuda":
+            return param.device
+
+    for param in model.parameters():
+        if param.device.type != "meta":
+            return param.device
+
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def has_meta_parameters(model):
+    return any(param.device.type == "meta" for param in model.parameters())
+
+
+def should_run_prompt_eval(model, prompt_eval_mode, device_map):
+    mode = prompt_eval_mode.lower()
+    if mode == "on":
+        return True
+
+    if mode == "off":
+        return False
+
+    if device_map == "trainable":
+        print(
+            "Prompt generation evaluation skipped: device_map=trainable uses "
+            "CPU/offload meta tensors. Trainer eval loss still runs."
+        )
+        return False
+
+    if has_meta_parameters(model):
+        print(
+            "Prompt generation evaluation skipped: model has meta/offloaded "
+            "parameters. Use --prompt_eval on to force it."
+        )
+        return False
+
+    return True
+
+
 @torch.no_grad()
 def run_eval(model, tokenizer, prompts, max_new_tokens=MAX_NEW_TOKENS):
 
     model.eval()
+    input_device = preferred_input_device(model)
 
     print("\n================ EVAL ================\n")
 
@@ -487,7 +611,7 @@ def run_eval(model, tokenizer, prompts, max_new_tokens=MAX_NEW_TOKENS):
         inputs = tokenizer(
             prompt,
             return_tensors="pt",
-        ).to(model.device)
+        ).to(input_device)
 
         output = model.generate(
             **inputs,
@@ -735,21 +859,27 @@ def main():
         "--dtype",
         choices=("auto", "bf16", "fp16", "fp32"),
         default=DEFAULT_DTYPE,
-        help="Model and training dtype. BF16 is preferred on RDNA3/ROCm; FP16 runs without Trainer AMP scaling.",
+        help=(
+            "Model and training dtype. BF16 is preferred on RDNA3/ROCm; "
+            "FP16 runs without Trainer AMP scaling."
+        ),
     )
 
     parser.add_argument(
         "--attention",
         choices=("auto", "flash_attention_2", "sdpa", "eager", "default"),
         default=DEFAULT_ATTENTION,
-        help="Attention backend. Smaller systems often work well with sdpa.",
+        help="Attention backend. Use eager for GPT-OSS on this Transformers build.",
     )
 
     parser.add_argument(
         "--device_map",
-        choices=("auto", "single", "none"),
+        choices=("auto", "single", "trainable", "none"),
         default=DEFAULT_DEVICE_MAP,
-        help="'auto' lets Transformers place layers, 'single' forces GPU 0.",
+        help=(
+            "'auto' lets Transformers place layers, 'single' forces GPU 0, "
+            "'trainable' keeps the GPT-OSS trainable tail on GPU."
+        ),
     )
     parser.add_argument(
         "--max_memory",
@@ -765,7 +895,10 @@ def main():
         "--mxfp4_dequantize",
         action=argparse.BooleanOptionalAction,
         default=DEFAULT_MXFP4_DEQUANTIZE,
-        help="Dequantize MXFP4 weights to bf16 while loading. Uses more CPU RAM but avoids MXFP4 GPU conversion.",
+        help=(
+            "Dequantize MXFP4 weights to bf16 while loading. Uses more CPU RAM "
+            "but avoids MXFP4 GPU conversion."
+        ),
     )
 
     parser.add_argument(
@@ -856,7 +989,10 @@ def main():
         "--save_steps",
         type=int,
         default=DEFAULT_SAVE_STEPS,
-        help="Checkpoint interval in optimizer steps. Small runs are capped to save at least one checkpoint.",
+        help=(
+            "Checkpoint interval in optimizer steps. Small runs are capped to "
+            "save at least one checkpoint."
+        ),
     )
 
     parser.add_argument(
@@ -918,6 +1054,16 @@ def main():
         "--eval_max_new_tokens",
         type=int,
         default=MAX_NEW_TOKENS,
+    )
+
+    parser.add_argument(
+        "--prompt_eval",
+        choices=("auto", "on", "off"),
+        default=DEFAULT_PROMPT_EVAL,
+        help=(
+            "Run prompt-generation eval before/after training. 'auto' skips "
+            "offloaded trainable-tail models and still keeps Trainer eval loss."
+        ),
     )
 
     args = parser.parse_args()
@@ -985,7 +1131,13 @@ def main():
     print(f"Attention: {args.attention}")
     print(f"Device map: {args.device_map}")
     if args.max_memory:
-        print(f"Max memory: GPU 0={args.max_memory}, CPU={args.cpu_memory}")
+        if args.device_map == "auto":
+            print(f"Max memory: GPU 0={args.max_memory}, CPU={args.cpu_memory}")
+        else:
+            print(
+                f"Max memory: {args.max_memory} "
+                f"(ignored with device_map={args.device_map}; only auto uses it)"
+            )
     print(f"MXFP4 dequantize: {args.mxfp4_dequantize}")
 
     model = load_causal_lm(
@@ -995,6 +1147,8 @@ def main():
         device_map=args.device_map,
         max_memory=args.max_memory,
         cpu_memory=args.cpu_memory,
+        train_last_n_layers=args.train_last_n_layers,
+        train_lm_head=args.train_lm_head,
         mxfp4_dequantize=args.mxfp4_dequantize,
         low_cpu_mem_usage=args.low_cpu_mem_usage,
     )
@@ -1031,19 +1185,27 @@ def main():
         for p in prompts
         if p.strip()
     ]
+    run_prompt_eval = should_run_prompt_eval(
+        model,
+        args.prompt_eval,
+        args.device_map,
+    )
 
     # ========================================================
     # Baseline evaluation
     # ========================================================
 
-    print("\nRUNNING BASELINE EVALUATION\n")
+    if run_prompt_eval:
+        print("\nRUNNING BASELINE EVALUATION\n")
 
-    run_eval(
-        model,
-        tokenizer,
-        prompts,
-        max_new_tokens=args.eval_max_new_tokens,
-    )
+        run_eval(
+            model,
+            tokenizer,
+            prompts,
+            max_new_tokens=args.eval_max_new_tokens,
+        )
+    else:
+        print("\nSKIPPING BASELINE PROMPT EVALUATION\n")
 
     # ========================================================
     # Training arguments
@@ -1120,14 +1282,17 @@ def main():
     # Final evaluation
     # ========================================================
 
-    print("\nRUNNING FINAL EVALUATION\n")
+    if run_prompt_eval:
+        print("\nRUNNING FINAL EVALUATION\n")
 
-    run_eval(
-        model,
-        tokenizer,
-        prompts,
-        max_new_tokens=args.eval_max_new_tokens,
-    )
+        run_eval(
+            model,
+            tokenizer,
+            prompts,
+            max_new_tokens=args.eval_max_new_tokens,
+        )
+    else:
+        print("\nSKIPPING FINAL PROMPT EVALUATION\n")
 
     # ========================================================
     # Save model

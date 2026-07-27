@@ -4,8 +4,8 @@ Local data preparation, RAG indexing, continued pretraining, LoRA training, and
 chat tooling for Hugging Face causal language models.
 
 The project is tuned for experimenting on local hardware, including consumer
-AMD/ROCm and NVIDIA GPUs. The current defaults favor low-VRAM Radeon cards such
-as 8 GB RDNA3 parts, while leaving the knobs exposed for larger GPUs.
+AMD/ROCm and NVIDIA GPUs. The current defaults target a midrange local GPU such
+as a 16 GB RTX card, while leaving low-VRAM and larger-GPU knobs exposed.
 
 ![Bolt Graphics Zeus](https://raw.githubusercontent.com/exalakeLabs/res/main/images/Bolt-Graphics-Zeus-1456x819-2949710606.png)
 
@@ -24,9 +24,10 @@ This repo lets you build a local model workspace from source documents:
 The top-level Zsh launchers are the preferred entrypoints:
 
 ```text
-install.zsh      Create/update .venv, install backend-specific PyTorch, prepare .env.
-pipeline.zsh     Main workflow runner for corpus, RAG, pretraining, and LoRA.
-chat.zsh         Runtime launcher with low/high-VRAM GPU profiles.
+install.zsh             Create/update .venv, install backend-specific PyTorch.
+pipeline.zsh            Compatibility wrapper for run-train-pipeline.zsh.
+run-train-pipeline.zsh  Main workflow runner for corpus, RAG, pretraining, LoRA.
+chat.zsh                Runtime launcher with low/high-VRAM GPU profiles.
 ```
 
 The Python files under `src/*.py` are compatibility wrappers around the package
@@ -41,7 +42,8 @@ project-root/
   eval_prompts.txt   Prompts used before/after continued pretraining.
   prompt_engineer.txt
   install.zsh
-  pipeline.zsh
+  pipeline.zsh      Compatibility wrapper around run-train-pipeline.zsh.
+  run-train-pipeline.zsh
   chat.zsh
   src/
     data_prep/       Download, clean, pack token corpus, make training pairs.
@@ -53,16 +55,16 @@ project-root/
 
 ## Quick Start
 
-Install the Python environment for your accelerator:
+Install the Python environment for your accelerator. For an NVIDIA card:
 
 ```bash
-./install.zsh --backend rocm
+./install.zsh --backend cuda
 ```
 
 Other supported install backends:
 
 ```bash
-./install.zsh --backend cuda
+./install.zsh --backend rocm
 ./install.zsh --backend mps
 ```
 
@@ -91,9 +93,9 @@ Or run the main batch flow:
 
 ## Configuration
 
-`pipeline.zsh` loads `.runtime` when present, then loads `.env`. `install.zsh`
-creates `.env` from `.env.default` when missing and can prompt for literal
-defaults.
+`pipeline.zsh` is a compatibility wrapper around `run-train-pipeline.zsh`. The
+runner loads `.runtime` when present, then loads `.env`. `install.zsh` creates
+`.env` from `.env.default` when missing and can prompt for literal defaults.
 
 Important path variables:
 
@@ -134,8 +136,8 @@ appended to chat.
 
 ## The Pipeline Runner
 
-`pipeline.zsh` is the main operator interface. It can run complete workflows,
-single stages, or one stage with pass-through arguments.
+`pipeline.zsh` / `run-train-pipeline.zsh` is the main operator interface. It can
+run complete workflows, single stages, or one stage with pass-through arguments.
 
 ```bash
 ./pipeline.zsh [commands] [options] [-- extra-args]
@@ -203,6 +205,11 @@ If you change `DEFAULT_SEQ_LEN`, rebuild the packed corpus:
 
 For quick low-VRAM tests, `DEFAULT_MAX_TRAIN_TOKENS` can cap packed examples at
 training time even before you rebuild the JSONL corpus.
+
+This stage is CPU-bound. Hugging Face tokenizers and the dataset `map`/packing
+work run on CPU workers, so `nvidia-smi` will normally show little or no GPU
+activity. Use `--num-proc` and `DEFAULT_TOKENIZE_BATCH_SIZE` for throughput.
+GPU usage is expected during `rag`, `pretrain`, `lora`, and `chat.zsh`.
 
 ### CreateCorpusToken
 
@@ -331,7 +338,8 @@ the equivalent pass-through argument:
 --eval_prompts "$EVAL_PROMPTS"
 --corpus_dir "$CORPUS_DIR"
 --attention "$CONTINUED_PRETRAIN_ATTENTION"
---max_memory "$CONTINUED_PRETRAIN_MAX_MEMORY"
+--device_map "$CONTINUED_PRETRAIN_DEVICE_MAP"
+--max_memory "$CONTINUED_PRETRAIN_MAX_MEMORY", when device_map=auto
 --optim "$CONTINUED_PRETRAIN_OPTIM"
 --mxfp4_dequantize, unless CONTINUED_PRETRAIN_MXFP4_DEQUANTIZE=0
 ```
@@ -344,7 +352,28 @@ Pass trainer-specific arguments after `--`:
 ./pipeline.zsh pretrain -- --corpus_dir "$CORPUS_DIR" --eval_prompts eval_prompts.txt
 ```
 
-For low-VRAM Radeon cards, the current template uses:
+For a 16 GB RTX card, a reasonable starting point is:
+
+```bash
+DEFAULT_SEQ_LEN=1024
+DEFAULT_MAX_TRAIN_TOKENS=0
+DEFAULT_PER_DEVICE_TRAIN_BATCH_SIZE=2
+DEFAULT_GRADIENT_ACCUMULATION_STEPS=8
+DEFAULT_TRAIN_LAST_N_LAYERS=4
+DEFAULT_TRAIN_LM_HEAD=1
+DEFAULT_DTYPE=bf16
+DEFAULT_ATTENTION=eager
+CONTINUED_PRETRAIN_ATTENTION=eager
+DEFAULT_DEVICE_MAP=trainable
+CONTINUED_PRETRAIN_DEVICE_MAP=trainable
+DEFAULT_PROMPT_EVAL=auto
+DEFAULT_OPTIM=adamw_torch
+DEFAULT_MAX_GRAD_NORM=1.0
+CONTINUED_PRETRAIN_MAX_MEMORY=12GiB
+CONTINUED_PRETRAIN_MXFP4_DEQUANTIZE=1
+```
+
+For low-VRAM Radeon cards, use:
 
 ```bash
 DEFAULT_SEQ_LEN=256
@@ -354,29 +383,38 @@ DEFAULT_GRADIENT_ACCUMULATION_STEPS=32
 DEFAULT_TRAIN_LAST_N_LAYERS=1
 DEFAULT_TRAIN_LM_HEAD=0
 DEFAULT_DTYPE=bf16
-DEFAULT_ATTENTION=sdpa
-DEFAULT_DEVICE_MAP=single
+DEFAULT_ATTENTION=eager
+CONTINUED_PRETRAIN_ATTENTION=eager
+DEFAULT_DEVICE_MAP=trainable
+CONTINUED_PRETRAIN_DEVICE_MAP=trainable
+DEFAULT_PROMPT_EVAL=auto
 DEFAULT_OPTIM=adafactor
 DEFAULT_MAX_GRAD_NORM=0
 CONTINUED_PRETRAIN_MAX_MEMORY=3GiB
-CONTINUED_PRETRAIN_MXFP4_DEQUANTIZE=0
+CONTINUED_PRETRAIN_MXFP4_DEQUANTIZE=1
 ```
 
 Why these defaults matter:
 
+- `openai/gpt-oss-*` needs eager attention in this Transformers build.
+- `DEFAULT_DEVICE_MAP=trainable` keeps only the GPT-OSS trainable tail on GPU
+  and leaves the frozen lower layers on CPU, which is slower but avoids loading
+  the full 20B model into VRAM.
+- `CONTINUED_PRETRAIN_MXFP4_DEQUANTIZE=1` avoids the native MXFP4 CPU/offload
+  meta-tensor failure during training.
+- `DEFAULT_PROMPT_EVAL=auto` skips prompt-generation eval when the model is
+  offloaded; Trainer eval loss still runs.
 - BF16 avoids the FP16 AMP GradScaler failure on ROCm/RDNA3.
 - TF32 is disabled automatically unless the GPU is NVIDIA Ampere or newer.
 - `DEFAULT_TRAIN_LM_HEAD=0` avoids a large optimizer-state allocation.
-- `DEFAULT_DEVICE_MAP=single` keeps trainable layers on the GPU instead of
-  letting `device_map=auto` offload trainable upper layers to CPU.
 - `adafactor` avoids Adam's two full moment buffers, which often appear after
   the first optimizer step and can push 8 GB cards over the edge.
 - `DEFAULT_MAX_TRAIN_TOKENS` gives an immediate activation-memory cap even when
   the packed corpus was generated at a longer sequence length.
 
 On a larger GPU, increase `DEFAULT_TRAIN_LAST_N_LAYERS`, use a longer
-`DEFAULT_SEQ_LEN`, and consider `DEFAULT_DEVICE_MAP=auto` with a realistic
-`DEFAULT_MAX_MEMORY`.
+`DEFAULT_SEQ_LEN`, and consider `DEFAULT_DEVICE_MAP=single` only when the full
+model fits in VRAM. `DEFAULT_MAX_MEMORY` only applies to `device_map=auto`.
 
 ### LoRA Stage
 
@@ -494,6 +532,51 @@ python3 src/utils/pdf_to_txt.py --pdf-dir "$PDF_DIR" --text-dir "$RAWTEXT_DIR"
 
 ## Troubleshooting
 
+`GptOssForCausalLM does not support ... scaled_dot_product_attention`
+
+Use eager attention:
+
+```bash
+export DEFAULT_ATTENTION=eager
+export CONTINUED_PRETRAIN_ATTENTION=eager
+./pipeline.zsh pretrain
+```
+
+CUDA out of memory while loading GPT-OSS weights
+
+`DEFAULT_MAX_MEMORY` does not limit loading when `DEFAULT_DEVICE_MAP=single`.
+Use trainable-tail placement for continued pretraining on a 16 GB card:
+
+```bash
+export DEFAULT_DEVICE_MAP=trainable
+export CONTINUED_PRETRAIN_DEVICE_MAP=trainable
+export CONTINUED_PRETRAIN_MXFP4_DEQUANTIZE=1
+export CONTINUED_PRETRAIN_MAX_MEMORY=12GiB
+export DEFAULT_TRAIN_LAST_N_LAYERS=1
+export DEFAULT_TRAIN_LM_HEAD=0
+./pipeline.zsh pretrain
+```
+
+`Tensor on device meta is not on the expected device cuda:0`
+
+Native GPT-OSS MXFP4 plus CPU/offload placement can fail during training. Keep
+continued pretraining on the explicit BF16-dequantized path:
+
+```bash
+export CONTINUED_PRETRAIN_MXFP4_DEQUANTIZE=1
+./pipeline.zsh pretrain
+```
+
+`Tensor.item() cannot be called on meta tensors`
+
+This can happen during prompt-generation eval with CPU/offloaded models. Leave
+prompt eval on `auto`, or disable it explicitly:
+
+```bash
+export DEFAULT_PROMPT_EVAL=off
+./pipeline.zsh pretrain
+```
+
 `--tf32 requires Ampere or a newer GPU`
 
 TF32 is NVIDIA-specific. The continued-pretraining script now resolves TF32
@@ -507,8 +590,8 @@ FP16 AMP do not mix cleanly with GradScaler.
 `No inf checks were recorded for this optimizer`
 
 This usually means no trainable parameters were on the GPU. Keep
-`DEFAULT_DEVICE_MAP=single` on low-VRAM cards, or ensure `device_map=auto` does
-not offload the trainable upper layers to CPU.
+`DEFAULT_DEVICE_MAP=trainable` for GPT-OSS partial pretraining, or ensure
+`device_map=auto` does not offload the trainable upper layers to CPU.
 
 HIP out of memory on an 8 GB card
 

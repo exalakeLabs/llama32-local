@@ -6,11 +6,11 @@ cd "$ROOT"
 
 COMMANDS=()
 PASSTHROUGH_ARGS=()
-RAW_TEXT_OUTPUT_DIR="${RAWTEXT_DIR:-}"
-PREPARED_OUTPUT_DIR="${PREPARED_DIR:-}"
-CORPUS_OUTPUT_DIR="${CORPUS_DIR:-}"
-RAG_OUTPUT_DIR="${RAG_DIR:-}"
-CORPUS_TOKEN_OUTPUT_DIR="${DEFAULT_CORPUS_TOKEN_DIR:-}"
+RAW_TEXT_OUTPUT_DIR=""
+PREPARED_OUTPUT_DIR=""
+CORPUS_OUTPUT_DIR=""
+RAG_OUTPUT_DIR=""
+CORPUS_TOKEN_OUTPUT_DIR=""
 RUN_GUTENBERG=1
 RUN_WIKIPEDIA=1
 RUN_HTML=0
@@ -30,6 +30,7 @@ TRAINING_PAIRS_VAL="${TRAINING_PAIRS_VAL:-}"
 usage() {
   cat <<'EOF'
 Usage: ./pipeline.zsh [commands] [options] [-- extra-args]
+       ./run-train-pipeline.zsh [commands] [options] [-- extra-args]
 
 Commands:
   all                 Run corpus, rag, and pretrain.
@@ -86,7 +87,7 @@ Other:
   -h, --help            Show this help.
 
 Interactive mode:
-  Running ./pipeline.zsh with no command prompts for these stages:
+  Running ./pipeline.zsh or ./run-train-pipeline.zsh with no command prompts for these stages:
     1. Download content.
     2. Create/re-create corpus from cleaned text.
     3. Build the RAG index.
@@ -613,6 +614,34 @@ has_arg() {
   return 1
 }
 
+resolve_pretrain_attention() {
+  local attention="${CONTINUED_PRETRAIN_ATTENTION:-auto}"
+  local model="${DEFAULT_MODEL:-${BASE_MODEL:-${GENERATOR_MODEL:-}}}"
+
+  if [[ "${model:l}" == *gpt-oss* && "${attention:l}" != "eager" ]]; then
+    print -u2 "note: $model requires eager attention in this Transformers build; using --attention eager."
+    attention="eager"
+  fi
+
+  print -r -- "$attention"
+}
+
+resolve_pretrain_device_map() {
+  local device_map="${CONTINUED_PRETRAIN_DEVICE_MAP:-${DEFAULT_DEVICE_MAP:-auto}}"
+  local model="${DEFAULT_MODEL:-${BASE_MODEL:-${GENERATOR_MODEL:-}}}"
+
+  if [[ "${model:l}" == *gpt-oss* ]]; then
+    case "${device_map:l}" in
+      single|auto)
+        print -u2 "note: $model continued pretraining needs trainable-tail placement; using --device_map trainable."
+        device_map="trainable"
+        ;;
+    esac
+  fi
+
+  print -r -- "$device_map"
+}
+
 require_python_helpers() {
   if ! "$PYTHON" - <<'PY'
 from pathlib import Path
@@ -757,7 +786,7 @@ run_pretrain() {
 
   if [[ "$PYTHON" == */* && ! -x "$PYTHON" ]]; then
     print -u2 "error: Python executable not found: $PYTHON"
-    print -u2 "Run ./install.zsh --backend rocm, then source .runtime."
+    print -u2 "Run ./install.zsh --backend cuda or ./install.zsh --backend rocm, then source .runtime."
     exit 1
   fi
 
@@ -770,6 +799,7 @@ run_pretrain() {
   fi
 
   local -a eval_prompt_args rocm_safe_args
+  local pretrain_device_map=""
   eval_prompt_args=()
   rocm_safe_args=()
 
@@ -780,10 +810,16 @@ run_pretrain() {
     eval_prompt_args+=(--corpus_dir "$CORPUS_OUTPUT_DIR")
   fi
   if ! has_arg "--attention" "${PASSTHROUGH_ARGS[@]}"; then
-    rocm_safe_args+=(--attention "${CONTINUED_PRETRAIN_ATTENTION:-eager}")
+    rocm_safe_args+=(--attention "$(resolve_pretrain_attention)")
+  fi
+  if ! has_arg "--device_map" "${PASSTHROUGH_ARGS[@]}"; then
+    pretrain_device_map="$(resolve_pretrain_device_map)"
+    rocm_safe_args+=(--device_map "$pretrain_device_map")
   fi
   if ! has_arg "--max_memory" "${PASSTHROUGH_ARGS[@]}"; then
-    rocm_safe_args+=(--max_memory "${CONTINUED_PRETRAIN_MAX_MEMORY:-4GiB}")
+    if [[ -z "$pretrain_device_map" || "${pretrain_device_map:l}" == "auto" ]]; then
+      rocm_safe_args+=(--max_memory "${CONTINUED_PRETRAIN_MAX_MEMORY:-4GiB}")
+    fi
   fi
   if ! has_arg "--optim" "${PASSTHROUGH_ARGS[@]}"; then
     rocm_safe_args+=(--optim "${CONTINUED_PRETRAIN_OPTIM:-adamw_torch}")

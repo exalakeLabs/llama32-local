@@ -5,16 +5,14 @@ torchvision>=0.16.0
 torchaudio>=2.1.0
 transformers>=4.55.0
 tiktoken>=0.7.0
-kernels>=0.9.0
 datasets>=2.16.0
 peft>=0.11.0
 trl>=0.8.0
 accelerate>=0.30.0
 sentence-transformers>=2.6.0
-# kernels 0.15+ requires LayerRepository revision/version metadata that some
-# Transformers import paths do not pass yet.
-kernels>=0.12.0,<0.15.0
-kernels-data>=0.14.0,<0.15.0
+# Transformers 5.14 expects this kernels range for GPT-OSS MXFP4 loading.
+kernels>=0.15.2,<0.16.0
+kernels-data>=0.15.2,<0.16.0
 faiss-cpu>=1.7.4
 numpy>=1.24.0
 fastapi>=0.109.0
